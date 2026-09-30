@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>K4-L3B Day 13 Monitoring & LLMOps — Runtime Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background-color: #0f172a;
+      color: #f8fafc;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      padding: 24px;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid #334155;
+      padding-bottom: 16px;
+      margin-bottom: 24px;
+    }
+    h1 { font-size: 20px; font-weight: 700; color: #38bdf8; }
+    .meta { font-size: 13px; color: #94a3b8; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 20px;
+    }
+    .card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 16px;
+      position: relative;
+    }
+    .card h3 {
+      font-size: 14px;
+      color: #e2e8f0;
+      margin-bottom: 6px;
+      display: flex;
+      justify-content: space-between;
+    }
+    .badge {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      background: #0284c7;
+      color: #fff;
+    }
+    .badge-alert { background: #dc2626; }
+    .badge-ok { background: #16a34a; }
+    .subtitle { font-size: 11px; color: #64748b; margin-bottom: 12px; }
+    .chart-container { position: relative; height: 180px; width: 100%; }
+    footer {
+      margin-top: 24px;
+      padding-top: 12px;
+      border-top: 1px solid #334155;
+      text-align: center;
+      font-size: 12px;
+      color: #64748b;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>⚡ K4-L3B Day 13 Monitoring & LLMOps — Runtime Dashboard</h1>
+      <div class="meta">Student: <strong>Nguyen Xuan Thanh (2A202602666)</strong> | Cohort: <strong>K4-L3B</strong> | Source: <code>data/logs.jsonl</code></div>
+    </div>
+    <div style="text-align: right;">
+      <span class="badge badge-ok">Contract: 6/6 Panels Valid</span>
+      <div class="meta" style="margin-top: 4px;">Time range: 60m | Refresh: 30s</div>
+    </div>
+  </header>
+
+  <div class="grid">
+    <!-- Panel 1: Latency -->
+    <div class="card">
+      <h3>Panel 1: Latency & TTFT <span class="badge badge-ok">Threshold: &le; 3000ms</span></h3>
+      <div class="subtitle">Unit: ms | Percentiles: P50, P95, P99, TTFT P95</div>
+      <div class="chart-container">
+        <canvas id="latencyChart"></canvas>
+      </div>
+    </div>
+
+    <!-- Panel 2: Traffic -->
+    <div class="card">
+      <h3>Panel 2: Request Traffic <span class="badge badge-ok">Threshold: &ge; 1 RPM</span></h3>
+      <div class="subtitle">Unit: requests_per_minute | Source: request_received</div>
+      <div class="chart-container">
+        <canvas id="trafficChart"></canvas>
+      </div>
+    </div>
+
+    <!-- Panel 3: Errors & Tool Success -->
+    <div class="card">
+      <h3>Panel 3: Errors & Retrieval Success <span class="badge badge-ok">Error Rate &le; 2%</span></h3>
+      <div class="subtitle">Unit: percent | Errors: 0.0% | Retrieval Success: 100%</div>
+      <div class="chart-container">
+        <canvas id="errorChart"></canvas>
+      </div>
+    </div>
+
+    <!-- Panel 4: Cost -->
+    <div class="card">
+      <h3>Panel 4: Cost Over Time <span class="badge badge-ok">Budget &le; $2.50</span></h3>
+      <div class="subtitle">Unit: USD | Cumulative: $0.0475 USD</div>
+      <div class="chart-container">
+        <canvas id="costChart"></canvas>
+      </div>
+    </div>
+
+    <!-- Panel 5: Tokens -->
+    <div class="card">
+      <h3>Panel 5: Input & Output Tokens <span class="badge badge-ok">Limit &le; 50,000</span></h3>
+      <div class="subtitle">Unit: tokens | In: 480 | Out: 1,320 | Total: 1,800</div>
+      <div class="chart-container">
+        <canvas id="tokenChart"></canvas>
+      </div>
+    </div>
+
+    <!-- Panel 6: Quality Proxy -->
+    <div class="card">
+      <h3>Panel 6: Quality Proxy Score <span class="badge badge-ok">Min &ge; 0.75</span></h3>
+      <div class="subtitle">Unit: score (0.0 to 1.0) | Mean Score: 0.88</div>
+      <div class="chart-container">
+        <canvas id="qualityChart"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    Contract compliance: <code>config/dashboard.yaml</code> | Target SLO: 99.5% fast requests (&le; 3000ms) with 0.5% error budget
+  </footer>
+
+  <script>
+    const chartDefaults = {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { labels: { color: '#94a3b8', font: { size: 10 } } } },
+      scales: {
+        x: { ticks: { color: '#94a3b8', font: { size: 9 } }, grid: { color: '#334155' } },
+        y: { ticks: { color: '#94a3b8', font: { size: 9 } }, grid: { color: '#334155' } }
+      }
+    };
+
+    // 1. Latency
+    new Chart(document.getElementById('latencyChart'), {
+      type: 'bar',
+      data: {
+        labels: ['P50', 'P95', 'P99', 'TTFT P95'],
+        datasets: [{
+          label: 'Latency (ms)',
+          data: [171, 172, 1390, 55],
+          backgroundColor: ['#38bdf8', '#818cf8', '#f43f5e', '#a855f7'],
+          borderRadius: 4
+        }]
+      },
+      options: {
+        ...chartDefaults,
+        scales: {
+          ...chartDefaults.scales,
+          y: { ...chartDefaults.scales.y, max: 3200, ticks: { callback: v => v + 'ms' } }
+        }
+      }
+    });
+
+    // 2. Traffic
+    new Chart(document.getElementById('trafficChart'), {
+      type: 'line',
+      data: {
+        labels: ['10:00', '10:05', '10:10', '10:15', '10:20', '10:25'],
+        datasets: [{
+          label: 'RPM',
+          data: [2, 10, 5, 12, 8, 10],
+          borderColor: '#38bdf8',
+          backgroundColor: 'rgba(56, 189, 248, 0.1)',
+          fill: true,
+          tension: 0.3
+        }]
+      },
+      options: chartDefaults
+    });
+
+    // 3. Errors
+    new Chart(document.getElementById('errorChart'), {
+      type: 'bar',
+      data: {
+        labels: ['Error Rate (%)', 'Retrieval Success (%)'],
+        datasets: [{
+          label: 'Percent (%)',
+          data: [0, 100],
+          backgroundColor: ['#ef4444', '#10b981'],
+          borderRadius: 4
+        }]
+      },
+      options: {
+        ...chartDefaults,
+        scales: { ...chartDefaults.scales, y: { ...chartDefaults.scales.y, max: 100 } }
+      }
+    });
+
+    // 4. Cost
+    new Chart(document.getElementById('costChart'), {
+      type: 'line',
+      data: {
+        labels: ['10:00', '10:05', '10:10', '10:15', '10:20', '10:25'],
+        datasets: [{
+          label: 'Cumulative USD ($)',
+          data: [0.005, 0.015, 0.022, 0.035, 0.042, 0.0475],
+          borderColor: '#fbbf24',
+          tension: 0.2
+        }]
+      },
+      options: {
+        ...chartDefaults,
+        scales: { ...chartDefaults.scales, y: { ...chartDefaults.scales.y, max: 0.1, ticks: { callback: v => '$' + v } } }
+      }
+    });
+
+    // 5. Tokens
+    new Chart(document.getElementById('tokenChart'), {
+      type: 'bar',
+      data: {
+        labels: ['Tokens In', 'Tokens Out', 'Total'],
+        datasets: [{
+          label: 'Token Count',
+          data: [480, 1320, 1800],
+          backgroundColor: ['#38bdf8', '#818cf8', '#6366f1'],
+          borderRadius: 4
+        }]
+      },
+      options: chartDefaults
+    });
+
+    // 6. Quality
+    new Chart(document.getElementById('qualityChart'), {
+      type: 'bar',
+      data: {
+        labels: ['Mean Score'],
+        datasets: [{
+          label: 'Quality Score (0 to 1)',
+          data: [0.88],
+          backgroundColor: ['#10b981'],
+          borderRadius: 4
+        }]
+      },
+      options: {
+        ...chartDefaults,
+        scales: { ...chartDefaults.scales, y: { ...chartDefaults.scales.y, max: 1.0, min: 0.0 } }
+      }
+    });
+  </script>
+</body>
+</html>

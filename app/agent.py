@@ -12,6 +12,19 @@ from .prompt_management import resolve_prompt
 from .tracing import get_langfuse_client, observe, propagate_attributes, tracing_enabled
 
 
+from contextlib import contextmanager
+from typing import Any
+
+
+@contextmanager
+def _observation(client: Any, **kwargs: Any):
+    if tracing_enabled() and hasattr(client, "start_as_current_observation"):
+        with client.start_as_current_observation(**kwargs) as obs:
+            yield obs
+    else:
+        yield None
+
+
 @dataclass
 class AgentResult:
     answer: str
@@ -51,7 +64,14 @@ class LabAgent:
             },
         ):
             started = time.perf_counter()
-            docs = retrieve(message)
+            with _observation(
+                langfuse_client,
+                name="retrieval",
+                as_type="retriever",
+                input={"query": summarize_text(message)},
+            ):
+                docs = retrieve(message)
+
             prompt = resolve_prompt(
                 langfuse_client,
                 feature=feature,
@@ -71,13 +91,42 @@ class LabAgent:
                 },
                 version=prompt.version,
             )
-            # TODO (CP2): instrument retrieve() and FakeLLM.generate() as child
-            # observations. The nested generation must receive prompt, usage and cost.
             with propagate_attributes(prompt=prompt.managed_prompt):
-                response = self.llm.generate(prompt.text)
+                with _observation(
+                    langfuse_client,
+                    name="generation",
+                    as_type="generation",
+                    model=self.model,
+                    prompt=prompt.managed_prompt,
+                    input=prompt.text,
+                ) as gen_obs:
+                    response = self.llm.generate(prompt.text)
+                    cost_usd = self._estimate_cost(
+                        response.usage.input_tokens, response.usage.output_tokens
+                    )
+                    usage_dict = {
+                        "input": response.usage.input_tokens,
+                        "output": response.usage.output_tokens,
+                        "total": response.usage.input_tokens + response.usage.output_tokens,
+                    }
+                    cost_dict = {"total": cost_usd}
+                    if gen_obs is not None and hasattr(gen_obs, "update"):
+                        gen_obs.update(
+                            model=self.model,
+                            output=response.text,
+                            usage_details=usage_dict,
+                            cost_details=cost_dict,
+                        )
+                    if hasattr(langfuse_client, "update_current_generation"):
+                        langfuse_client.update_current_generation(
+                            model=self.model,
+                            output=response.text,
+                            usage_details=usage_dict,
+                            cost_details=cost_dict,
+                        )
+
             quality_score = self._heuristic_quality(message, response.text, docs)
             latency_ms = int((time.perf_counter() - started) * 1000)
-            cost_usd = self._estimate_cost(response.usage.input_tokens, response.usage.output_tokens)
 
         metrics.record_request(
             latency_ms=latency_ms,
